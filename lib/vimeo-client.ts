@@ -152,3 +152,167 @@ export async function verifyToken(accessToken: string): Promise<{ name: string; 
   const data = await vimeoFetch(accessToken, "/me");
   return { name: data.name, account: data.account };
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Player appearance (embed settings)
+// ─────────────────────────────────────────────────────────────────
+
+export interface VideoAppearance {
+  /** Color de acento del reproductor en hex, ej "#00adef" */
+  color?: string;
+  /** Color de fondo del player (si aplica al nivel de plan) */
+  background_color?: string;
+  /** "light" o "dark" — esquema general del player */
+  color_style?: "light" | "dark";
+  /** Ocultar título del vídeo */
+  hide_title?: boolean;
+  /** Ocultar nombre del autor (byline) */
+  hide_byline?: boolean;
+  /** Ocultar avatar del autor */
+  hide_portrait?: boolean;
+  /** Ocultar logo de Vimeo en el player */
+  hide_vimeo_logo?: boolean;
+  /** Logo custom: url directa a imagen PNG del logo + link al clicarlo */
+  custom_logo_url?: string;
+  custom_logo_link?: string;
+  /** Botones individuales: mostrar/ocultar */
+  show_fullscreen?: boolean;
+  show_share?: boolean;
+  show_embed?: boolean;
+  show_like?: boolean;
+  show_watchlater?: boolean;
+  /** Controles del player */
+  show_playbar?: boolean;
+  show_volume?: boolean;
+  show_speed?: boolean;
+  show_cc?: boolean;
+}
+
+function buildEmbedPayload(appearance: VideoAppearance): Record<string, unknown> {
+  const embed: Record<string, unknown> = {};
+  if (appearance.color) embed.color = appearance.color.replace(/^#/, "");
+  if (appearance.background_color) embed.background_color = appearance.background_color.replace(/^#/, "");
+  if (appearance.color_style) embed.color_style = appearance.color_style;
+
+  const title: Record<string, string> = {};
+  if (appearance.hide_title !== undefined) title.name = appearance.hide_title ? "hide" : "show";
+  if (appearance.hide_byline !== undefined) title.owner = appearance.hide_byline ? "hide" : "show";
+  if (appearance.hide_portrait !== undefined) title.portrait = appearance.hide_portrait ? "hide" : "show";
+  if (Object.keys(title).length > 0) embed.title = title;
+
+  const logos: Record<string, unknown> = {};
+  if (appearance.hide_vimeo_logo !== undefined) logos.vimeo = !appearance.hide_vimeo_logo;
+  if (appearance.custom_logo_url) {
+    logos.custom = {
+      active: true,
+      url: appearance.custom_logo_url,
+      link: appearance.custom_logo_link ?? undefined,
+    };
+  }
+  if (Object.keys(logos).length > 0) embed.logos = logos;
+
+  const buttons: Record<string, boolean> = {};
+  if (appearance.show_fullscreen !== undefined) buttons.fullscreen = appearance.show_fullscreen;
+  if (appearance.show_share !== undefined) buttons.share = appearance.show_share;
+  if (appearance.show_embed !== undefined) buttons.embed = appearance.show_embed;
+  if (appearance.show_like !== undefined) buttons.like = appearance.show_like;
+  if (appearance.show_watchlater !== undefined) buttons.watchlater = appearance.show_watchlater;
+  if (Object.keys(buttons).length > 0) embed.buttons = buttons;
+
+  if (appearance.show_playbar !== undefined) embed.playbar = appearance.show_playbar;
+  if (appearance.show_volume !== undefined) embed.volume = appearance.show_volume;
+  if (appearance.show_speed !== undefined) embed.speed = appearance.show_speed;
+  if (appearance.show_cc !== undefined) embed.cc = appearance.show_cc;
+
+  return embed;
+}
+
+export async function setVideoAppearance(
+  accessToken: string,
+  videoId: string,
+  appearance: VideoAppearance,
+): Promise<{ video_id: string; applied: VideoAppearance; updated_at: string }> {
+  const embed = buildEmbedPayload(appearance);
+  if (Object.keys(embed).length === 0) {
+    throw new Error("No appearance fields provided — nothing to update");
+  }
+  const data = await vimeoFetch(accessToken, `/videos/${videoId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ embed }),
+  });
+  return { video_id: videoId, applied: appearance, updated_at: data.modified_time ?? "" };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Domain whitelist (privacy.embed = "whitelist")
+// ─────────────────────────────────────────────────────────────────
+
+export interface DomainWhitelistResult {
+  video_id: string;
+  privacy_mode: "whitelist";
+  domains_added: string[];
+  domains_failed: Array<{ domain: string; error: string }>;
+  requires_paid_plan: boolean;
+}
+
+export async function setVideoAllowedDomains(
+  accessToken: string,
+  videoId: string,
+  domains: string[],
+): Promise<DomainWhitelistResult> {
+  // Paso 1: cambiar privacy mode a whitelist
+  let requiresPaid = false;
+  try {
+    await vimeoFetch(accessToken, `/videos/${videoId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ privacy: { embed: "whitelist" } }),
+    });
+  } catch (err: any) {
+    if (String(err?.message ?? "").match(/\b(402|403|plan|upgrade)/i)) {
+      requiresPaid = true;
+    }
+    throw new Error(
+      `No se pudo poner el vídeo en modo whitelist: ${err?.message ?? err}.` +
+      (requiresPaid ? " Este feature requiere Vimeo Pro/Business/Premium." : ""),
+    );
+  }
+
+  // Paso 2: añadir cada dominio
+  const added: string[] = [];
+  const failed: Array<{ domain: string; error: string }> = [];
+  for (const raw of domains) {
+    const domain = raw.trim().replace(/^https?:\/\//, "").replace(/\/$/, "").toLowerCase();
+    if (!domain) continue;
+    try {
+      await vimeoFetch(accessToken, `/videos/${videoId}/privacy/domains/${encodeURIComponent(domain)}`, {
+        method: "PUT",
+      });
+      added.push(domain);
+    } catch (err: any) {
+      failed.push({ domain, error: err?.message ?? String(err) });
+    }
+  }
+
+  return {
+    video_id: videoId,
+    privacy_mode: "whitelist",
+    domains_added: added,
+    domains_failed: failed,
+    requires_paid_plan: requiresPaid,
+  };
+}
+
+export async function clearVideoAllowedDomains(
+  accessToken: string,
+  videoId: string,
+): Promise<{ video_id: string; previous_count: number }> {
+  // GET /videos/{id}/privacy/domains lista los actuales
+  const data = await vimeoFetch(accessToken, `/videos/${videoId}/privacy/domains`);
+  const current: string[] = (data.data ?? []).map((d: any) => d.domain);
+  for (const d of current) {
+    await vimeoFetch(accessToken, `/videos/${videoId}/privacy/domains/${encodeURIComponent(d)}`, { method: "DELETE" });
+  }
+  return { video_id: videoId, previous_count: current.length };
+}

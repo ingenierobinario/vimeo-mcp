@@ -27,6 +27,9 @@ import {
   getVideoInfo,
   deleteVideo,
   verifyToken,
+  setVideoAppearance,
+  setVideoAllowedDomains,
+  clearVideoAllowedDomains,
 } from "./lib/vimeo-client.js";
 
 process.on("uncaughtException", (err) => {
@@ -128,6 +131,63 @@ function buildMcpServer(): McpServer {
         await deleteVideo(input.access_token, input.video_id);
         return ok({ deleted: true, video_id: input.video_id });
       } catch (e) { return err(e); }
+    },
+  );
+
+  server.tool(
+    "vimeo-set-video-appearance",
+    "Configura la apariencia del reproductor embebido: color de acento (hex del brandbook), ocultar título/byline/avatar/logo Vimeo, añadir logo custom, ocultar botones de share/embed/like, ocultar playbar/speed/volume. Todos los campos son opcionales — solo aplica los que pases.",
+    {
+      access_token: z.string(),
+      video_id: z.string(),
+      color: z.string().optional().describe("Color de acento hex, ej '#00adef'"),
+      background_color: z.string().optional(),
+      color_style: z.enum(["light", "dark"]).optional(),
+      hide_title: z.boolean().optional(),
+      hide_byline: z.boolean().optional(),
+      hide_portrait: z.boolean().optional(),
+      hide_vimeo_logo: z.boolean().optional().describe("Ocultar el logo de Vimeo en la esquina"),
+      custom_logo_url: z.string().optional().describe("URL pública del logo propio del alumno (PNG)"),
+      custom_logo_link: z.string().optional().describe("URL a la que lleva el clic en el logo"),
+      show_fullscreen: z.boolean().optional(),
+      show_share: z.boolean().optional(),
+      show_embed: z.boolean().optional(),
+      show_like: z.boolean().optional(),
+      show_watchlater: z.boolean().optional(),
+      show_playbar: z.boolean().optional(),
+      show_volume: z.boolean().optional(),
+      show_speed: z.boolean().optional(),
+      show_cc: z.boolean().optional(),
+    },
+    async (input) => {
+      try {
+        const { access_token, video_id, ...appearance } = input;
+        return ok(await setVideoAppearance(access_token, video_id, appearance));
+      } catch (e) { return err(e); }
+    },
+  );
+
+  server.tool(
+    "vimeo-set-video-allowed-domains",
+    "Restringe el embed del vídeo a una lista concreta de dominios (whitelist). REQUIERE plan Vimeo Pro o superior. Si el alumno está en Basic, devuelve error con mensaje claro. Uso: los 3 dominios del curso (ej: systeme.io, training.ingenierobinario.com, dominio propio del alumno).",
+    {
+      access_token: z.string(),
+      video_id: z.string(),
+      domains: z.array(z.string()).describe("Lista de dominios sin http:// y sin path, ej ['systeme.io', 'tunegocio.com']"),
+    },
+    async (input) => {
+      try { return ok(await setVideoAllowedDomains(input.access_token, input.video_id, input.domains)); }
+      catch (e) { return err(e); }
+    },
+  );
+
+  server.tool(
+    "vimeo-clear-video-allowed-domains",
+    "Borra la lista de dominios permitidos del vídeo (quita la whitelist). Uso: reset antes de reconfigurar.",
+    { access_token: z.string(), video_id: z.string() },
+    async (input) => {
+      try { return ok(await clearVideoAllowedDomains(input.access_token, input.video_id)); }
+      catch (e) { return err(e); }
     },
   );
 
