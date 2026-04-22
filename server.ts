@@ -28,8 +28,6 @@ import {
   deleteVideo,
   verifyToken,
   setVideoAppearance,
-  setVideoAllowedDomains,
-  clearVideoAllowedDomains,
 } from "./lib/vimeo-client.js";
 
 process.on("uncaughtException", (err) => {
@@ -81,7 +79,7 @@ function buildMcpServer(): McpServer {
       file_path: z.string().describe("Ruta absoluta al archivo de vídeo local"),
       name: z.string().optional(),
       description: z.string().optional(),
-      privacy: z.enum(["anybody", "nobody", "unlisted"]).optional().describe("anybody=público, nobody=solo el dueño, unlisted=link directo (por defecto el curso quiere unlisted para embeds privados)"),
+      privacy: z.enum(["anybody", "nobody", "unlisted"]).optional().describe("anybody=público (default del curso, los vídeos se embeben en web+funnels del alumno), unlisted=link directo solamente, nobody=solo el dueño"),
     },
     async (input) => {
       try {
@@ -92,7 +90,7 @@ function buildMcpServer(): McpServer {
           size: st.size,
           name: input.name,
           description: input.description,
-          privacy: input.privacy ?? "unlisted",
+          privacy: input.privacy ?? "anybody",
         });
         await uploadVideoBytes(upload.upload_link, buf);
         // Espera breve para que Vimeo empiece a transcodificar
@@ -164,30 +162,6 @@ function buildMcpServer(): McpServer {
         const { access_token, video_id, ...appearance } = input;
         return ok(await setVideoAppearance(access_token, video_id, appearance));
       } catch (e) { return err(e); }
-    },
-  );
-
-  server.tool(
-    "vimeo-set-video-allowed-domains",
-    "Restringe el embed del vídeo a una lista concreta de dominios (whitelist). REQUIERE plan Vimeo Pro o superior. Si el alumno está en Basic, devuelve error con mensaje claro. Uso: los 3 dominios del curso (ej: systeme.io, training.ingenierobinario.com, dominio propio del alumno).",
-    {
-      access_token: z.string(),
-      video_id: z.string(),
-      domains: z.array(z.string()).describe("Lista de dominios sin http:// y sin path, ej ['systeme.io', 'tunegocio.com']"),
-    },
-    async (input) => {
-      try { return ok(await setVideoAllowedDomains(input.access_token, input.video_id, input.domains)); }
-      catch (e) { return err(e); }
-    },
-  );
-
-  server.tool(
-    "vimeo-clear-video-allowed-domains",
-    "Borra la lista de dominios permitidos del vídeo (quita la whitelist). Uso: reset antes de reconfigurar.",
-    { access_token: z.string(), video_id: z.string() },
-    async (input) => {
-      try { return ok(await clearVideoAllowedDomains(input.access_token, input.video_id)); }
-      catch (e) { return err(e); }
     },
   );
 
