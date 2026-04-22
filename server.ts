@@ -248,6 +248,6 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "vimeo-mcp", version: "0.1.0" });
 });
 
-app.listen(PORT, () => {
-  console.log(`[vimeo-mcp] listening on :${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`[vimeo-mcp] listening on 0.0.0.0:${PORT} (NODE_ENV=${process.env.NODE_ENV ?? "dev"}, secret_set=${!!INTERNAL_API_SECRET})`);
 });
