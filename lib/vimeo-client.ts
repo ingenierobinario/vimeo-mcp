@@ -82,37 +82,40 @@ export async function createVideoUpload(
 }
 
 /**
- * Paso 2 TUS: subir los bytes del fichero con PATCH al upload_link.
- * TUS spec permite chunking pero si el fichero es pequeño (<100MB)
- * mandamos todo de una. Vimeo acepta PATCH con header Upload-Offset.
+ * Genera el comando curl listo para que Cowork lo ejecute en la máquina
+ * del alumno. TUS single-request PATCH. Funciona para archivos hasta ~5GB
+ * (límite de Vimeo). Para vídeos >2GB algunos sistemas de archivos locales
+ * pueden tener problemas con `--data-binary @<file>` — en ese caso usar
+ * el helper de chunking que se entrega junto al MCP.
  */
-export async function uploadVideoBytes(
-  uploadLink: string,
-  fileBuffer: Buffer,
-  onProgress?: (bytesSent: number) => void,
-): Promise<void> {
-  const size = fileBuffer.length;
-  let offset = 0;
-  const CHUNK = 64 * 1024 * 1024; // 64MB chunks
+export function buildUploadCurlCommand(uploadLink: string, filePath: string): string {
+  // Escapar comillas del file path por si tiene espacios / caracteres especiales.
+  const safePath = filePath.replace(/"/g, '\\"');
+  return [
+    `curl -X PATCH "${uploadLink}"`,
+    `  -H "Tus-Resumable: 1.0.0"`,
+    `  -H "Upload-Offset: 0"`,
+    `  -H "Content-Type: application/offset+octet-stream"`,
+    `  --data-binary "@${safePath}"`,
+  ].join(" \\\n");
+}
 
-  while (offset < size) {
-    const end = Math.min(offset + CHUNK, size);
-    const chunk = fileBuffer.subarray(offset, end);
-    const res = await fetch(uploadLink, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/offset+octet-stream",
-        "Upload-Offset": String(offset),
-        "Tus-Resumable": "1.0.0",
-      },
-      body: new Uint8Array(chunk),
-    });
-    if (!res.ok && res.status !== 204) {
-      throw new Error(`TUS upload failed at offset ${offset}: ${res.status} ${res.statusText}`);
-    }
-    offset = end;
-    onProgress?.(offset);
-  }
+/**
+ * Consulta el upload.status del vídeo tras el PATCH para verificar que
+ * Vimeo ha recibido los bytes completos. Devuelve true si upload=complete,
+ * false si in_progress/error.
+ */
+export async function getUploadStatus(
+  accessToken: string,
+  videoId: string,
+): Promise<{ upload_status: string; bytes_uploaded?: number; transcode_status: string; available: boolean }> {
+  const data = await vimeoFetch(accessToken, `/videos/${videoId}`);
+  return {
+    upload_status: data.upload?.status ?? "unknown",
+    bytes_uploaded: data.upload?.size,
+    transcode_status: data.transcode?.status ?? data.status ?? "unknown",
+    available: data.status === "available",
+  };
 }
 
 export interface VideoInfo {

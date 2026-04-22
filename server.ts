@@ -13,7 +13,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -23,11 +22,12 @@ import cors from "cors";
 
 import {
   createVideoUpload,
-  uploadVideoBytes,
   getVideoInfo,
   deleteVideo,
   verifyToken,
   setVideoAppearance,
+  buildUploadCurlCommand,
+  getUploadStatus,
 } from "./lib/vimeo-client.js";
 
 process.on("uncaughtException", (err) => {
@@ -72,39 +72,65 @@ function buildMcpServer(): McpServer {
   );
 
   server.tool(
-    "vimeo-upload-video",
-    "Sube un vídeo desde el filesystem local al Vimeo del alumno y devuelve videoId + embed URL + iframe HTML. Usa TUS (resumable chunks 64MB).",
+    "vimeo-create-upload-ticket",
+    "Paso 1 del upload: crea la entrada del vídeo en Vimeo y devuelve un `upload_link` TUS + comando `curl` listo para que Cowork ejecute en la máquina del alumno (los bytes van directos alumno → Vimeo, sin pasar por este MCP). Tras ejecutar el curl, llamar a `vimeo-verify-upload-complete` para confirmar recepción.",
     {
       access_token: z.string(),
-      file_path: z.string().describe("Ruta absoluta al archivo de vídeo local"),
+      size_bytes: z.number().describe("Tamaño del archivo en bytes (Cowork lo saca con Bash stat)"),
+      file_path: z.string().describe("Ruta absoluta en la máquina del alumno (se usa SOLO para construir el comando curl — el archivo no sale de su disco)"),
       name: z.string().optional(),
       description: z.string().optional(),
-      privacy: z.enum(["anybody", "nobody", "unlisted"]).optional().describe("anybody=público (default del curso, los vídeos se embeben en web+funnels del alumno), unlisted=link directo solamente, nobody=solo el dueño"),
+      privacy: z.enum(["anybody", "nobody", "unlisted"]).optional().describe("anybody=público (default del curso), unlisted=link directo, nobody=solo dueño"),
     },
     async (input) => {
       try {
-        const st = await stat(input.file_path);
-        if (!st.isFile()) throw new Error(`No es un archivo: ${input.file_path}`);
-        const buf = await readFile(input.file_path);
-        const upload = await createVideoUpload(input.access_token, {
-          size: st.size,
+        const ticket = await createVideoUpload(input.access_token, {
+          size: input.size_bytes,
           name: input.name,
           description: input.description,
           privacy: input.privacy ?? "anybody",
         });
-        await uploadVideoBytes(upload.upload_link, buf);
-        // Espera breve para que Vimeo empiece a transcodificar
-        const info = await getVideoInfo(input.access_token, upload.video_id);
+        const curl = buildUploadCurlCommand(ticket.upload_link, input.file_path);
         return ok({
-          video_id: upload.video_id,
-          video_uri: upload.video_uri,
-          public_link: info.link,
-          player_embed_url: info.player_embed_url,
-          embed_html: info.embed_html,
-          status: info.status,
-          note: info.status === "transcoding"
-            ? "Vimeo está transcodificando. El embed ya funciona pero la calidad final tarda 2-10min."
-            : "Vídeo listo.",
+          video_id: ticket.video_id,
+          video_uri: ticket.video_uri,
+          upload_link: ticket.upload_link,
+          quota_remaining_bytes: ticket.approx_byte_quota_remaining,
+          next_step_bash_command: curl,
+          next_step_explanation:
+            "Cowork debe ejecutar el comando `next_step_bash_command` con Bash en la máquina del alumno. Sube los bytes directamente a Vimeo (TUS PATCH). Tras éxito del curl, llamar a `vimeo-verify-upload-complete` con `video_id`.",
+        });
+      } catch (e) { return err(e); }
+    },
+  );
+
+  server.tool(
+    "vimeo-verify-upload-complete",
+    "Paso 2 del upload: verifica que Vimeo ha recibido los bytes tras el PATCH. Devuelve upload_status + transcode_status. Si upload_status='complete' y transcode_status='available' → listo. Si 'in_progress' → esperar y re-llamar (Vimeo transcodifica en 2-10 min según tamaño).",
+    {
+      access_token: z.string(),
+      video_id: z.string(),
+    },
+    async (input) => {
+      try {
+        const status = await getUploadStatus(input.access_token, input.video_id);
+        const info = await getVideoInfo(input.access_token, input.video_id).catch(() => null);
+        return ok({
+          video_id: input.video_id,
+          upload_status: status.upload_status,
+          transcode_status: status.transcode_status,
+          available: status.available,
+          player_embed_url: info?.player_embed_url ?? `https://player.vimeo.com/video/${input.video_id}`,
+          embed_html: info?.embed_html ?? "",
+          public_link: info?.link,
+          note:
+            status.upload_status === "complete" && status.available
+              ? "Vídeo disponible y transcodificado. Se puede embeber."
+              : status.upload_status === "complete"
+              ? "Bytes recibidos por Vimeo. Aún transcodificando — el embed funcionará en 2-10 min."
+              : status.upload_status === "in_progress"
+              ? "Subida en progreso. Vuelve a llamar cuando el curl termine."
+              : `Estado inesperado: ${status.upload_status}. Revisa el curl.`,
         });
       } catch (e) { return err(e); }
     },
